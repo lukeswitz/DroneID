@@ -87,9 +87,12 @@ def uart_listener(uart_device, pub):
                     if buffer.count("{") == buffer.count("}"):
                         if verbose:
                             print("UART received:", buffer)
-
+                            
                         try:
                             dc = json.loads(buffer)
+                            # Add hw_id for ESP32 NONE ids
+                            if "Basic ID" in dc and dc["Basic ID"]["id"] == "NONE":
+                                dc["Basic ID"]["hw_id"] = f"ESP32-{get_serial_number()}"
                             json_data = json.dumps(dc)
                             if pub:
                                 pub.send_string(json_data)
@@ -117,6 +120,16 @@ def process_decoded_data(dc, pub):
                     if verbose:
                         print("Open Drone ID BT4/BT5\n-------------------------\n")
                     json_data = decode_ble(advdata)
+                    # Add BT address to decoded data
+                    if isinstance(json_data, str):
+                        try:
+                            decoded_dict = json.loads(json_data)
+                            decoded_dict["btAddr"] = dc["AUX_ADV_IND"]["addr"]
+                            json_data = json.dumps(decoded_dict)
+                        except json.JSONDecodeError as e:
+                            if verbose:
+                                log("JSON Decode Error:", e)
+                                
                     if pub:
                         pub.send_string(json_data)
                     if verbose:
@@ -135,7 +148,8 @@ def process_decoded_data(dc, pub):
                 try:
                     fields = decode(structhelper_io(bytes.fromhex(field["AdvData"])))
                     for field_decoded in fields:
-                        field_decoded["MAC"] = mac
+                        # Add MAC address to decoded field
+                        field_decoded["MAC"] = mac if mac != "NONE" else f"ESP32-{get_serial_number()}"
                         json_data = json.dumps(field_decoded)
                         if pub:
                             pub.send_string(json_data)
@@ -146,7 +160,8 @@ def process_decoded_data(dc, pub):
                         log("Decoding Error:", e)
             else:
                 try:
-                    field["MAC"] = mac
+                    # Add MAC address directly to the field
+                    field["MAC"] = mac if mac != "NONE" else f"ESP32-{get_serial_number()}"
                     json_data = json.dumps(field)
                     if pub:
                         pub.send_string(json_data)
