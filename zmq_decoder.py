@@ -20,8 +20,8 @@ def log(*msg):
     if verbose:
         s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         print(f"{s}:", *msg, end="\n", file=sys.stderr)
-
-
+        
+        
 def zmq_thread(pub_socket):
     global stop
     try:
@@ -39,8 +39,8 @@ def zmq_thread(pub_socket):
                 log("ZMQ Thread Error:", e)
     except zmq.error.ContextTerminated:
         pass
-
-
+        
+        
 def decoder_thread(socket, pub):
     global stop
     poller = zmq.Poller()
@@ -55,7 +55,7 @@ def decoder_thread(socket, pub):
                     if verbose:
                         log("Receive Error:", e)
                     continue
-
+                
                 if data:
                     try:
                         dc = json.loads(data.decode('utf-8'))
@@ -63,7 +63,7 @@ def decoder_thread(socket, pub):
                         if verbose:
                             log("JSON Decode Error:", e)
                         continue
-
+                    
                     if verbose:
                         print("ZMQ Data Received:", json.dumps(dc, indent=2))
                     process_decoded_data(dc, pub)
@@ -72,8 +72,8 @@ def decoder_thread(socket, pub):
     except Exception as e:
         if verbose:
             log("Decoder Thread Error:", e)
-
-
+            
+            
 def uart_listener(uart_device, pub):
     global stop
     buffer = ""
@@ -108,8 +108,8 @@ def uart_listener(uart_device, pub):
                         log("UART Read Error:", e)
             else:
                 time.sleep(0.1)
-
-
+                
+                
 def process_decoded_data(dc, pub):
     """Processes and forwards the decoded data via ZMQ."""
     if "AUX_ADV_IND" in dc and "aa" in dc["AUX_ADV_IND"] and dc["AUX_ADV_IND"]["aa"] == 0x8e89bed6:
@@ -139,17 +139,33 @@ def process_decoded_data(dc, pub):
             except ValueError as e:
                 if verbose:
                     log("AdvData Decode Error:", e)
-
+                    
     elif "DroneID" in dc:
         for mac, field in dc["DroneID"].items():
+            # Fallback to serial number if MAC is "NONE"
+            mac_address = mac if mac != "NONE" else f"ESP32-{get_serial_number()}"
+            
             if verbose:
                 print("Open Drone ID WIFI\n-------------------------\n")
-            if "AdvData" in field:
+                
+                # Inject MAC address into all fields
+            if "GPS" in field:
+                # Ensure MAC address is included in GPS data
+                field["MAC"] = mac_address
+                try:
+                    json_data = json.dumps(field)
+                    if pub:
+                        pub.send_string(json_data)
+                    if verbose:
+                        print(json_data)
+                except Exception as e:
+                    if verbose:
+                        log("JSON Dump Error with GPS:", e)
+            elif "AdvData" in field:
                 try:
                     fields = decode(structhelper_io(bytes.fromhex(field["AdvData"])))
                     for field_decoded in fields:
-                        # Add MAC address to decoded field
-                        field_decoded["MAC"] = mac if mac != "NONE" else f"ESP32-{get_serial_number()}"
+                        field_decoded["MAC"] = mac_address
                         json_data = json.dumps(field_decoded)
                         if pub:
                             pub.send_string(json_data)
@@ -160,8 +176,8 @@ def process_decoded_data(dc, pub):
                         log("Decoding Error:", e)
             else:
                 try:
-                    # Add MAC address directly to the field
-                    field["MAC"] = mac if mac != "NONE" else f"ESP32-{get_serial_number()}"
+                    # Include MAC address in non-AdvData fields
+                    field["MAC"] = mac_address
                     json_data = json.dumps(field)
                     if pub:
                         pub.send_string(json_data)
@@ -170,11 +186,12 @@ def process_decoded_data(dc, pub):
                 except Exception as e:
                     if verbose:
                         log("JSON Dump Error:", e)
+                        
             if verbose:
                 print()
             sys.stdout.flush()
-
-
+            
+            
 def main():
     global stop
     global verbose
@@ -187,29 +204,29 @@ def main():
     aparse.add_argument("--zmqclients", default="127.0.0.1:4222,127.0.0.1:4223", help="Define Bluetooth/Wi-Fi ZMQ clients")
     aparse.add_argument("--uart", help="UART device for pre-decoded ESP32 data (e.g., /dev/ttyACM0)")
     args = aparse.parse_args()
-
+    
     verbose = args.verbose
-
+    
     # Initialize a single ZMQ context
     sctx = zmq.Context()
-
+    
     if args.zmq:
         pub = sctx.socket(zmq.XPUB)
         pub.setsockopt(zmq.XPUB_VERBOSE, True)
         purl = f"tcp://{args.zmqsetting}"
         pub.bind(purl)
-
+        
         zthread = Thread(target=zmq_thread, args=(pub,), daemon=True, name='zmq')
         zthread.start()
     else:
         pub = None
         zthread = None
-
-    # Set up UART and ZMQ client listeners concurrently
+        
+        # Set up UART and ZMQ client listeners concurrently
     if args.uart:
         uart_thread = Thread(target=uart_listener, args=(args.uart, pub), daemon=True)
         uart_thread.start()
-
+        
     clients = args.zmqclients.split(",")
     subs = []
     for client in clients:
@@ -223,11 +240,11 @@ def main():
             if verbose:
                 log(f"Failed to connect to {url}: {e}")
             continue
-
+        
         dthread = Thread(target=decoder_thread, args=(sub, pub), daemon=True, name=f'decoder-{client}')
         dthread.start()
         subs.append(dthread)
-
+        
     try:
         while True:
             time.sleep(1)
@@ -247,7 +264,8 @@ def main():
             zthread.join()
         if verbose:
             log("Shutdown complete.")
-
-
+            
+            
 if __name__ == "__main__":
     main()
+    
