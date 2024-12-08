@@ -14,3 +14,7 @@ DA_*.bin
 # Pyinstaller stuff
 build
 dist
+
+.venv/
+
+OpenDroneID/.DS_Store
