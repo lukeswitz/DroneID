@@ -16,5 +16,4 @@ build
 dist
 
 .venv/
-
-OpenDroneID/.DS_Store
+.DS_Store
