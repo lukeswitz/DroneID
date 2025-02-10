@@ -144,12 +144,13 @@ def process_decoded_data(dc, pub):
                         print("Open Drone ID BT4/BT5\n-------------------------\n")
                     json_data = decode_ble(advdata)
 
-                    # Add AdvA address to JSON if available
+                    # Add AdvA address and message type to JSON if available
                     if "aext" in dc and "AdvA" in dc["aext"]:
                         try:
                             json_obj = json.loads(json_data)
                             if isinstance(json_obj, list) and len(json_obj) > 0:
                                 for msg in json_obj:
+                                    msg["message_type"] = "bluetooth"  # Add message type
                                     if "Basic ID" in msg:
                                         adv_a = dc["aext"]["AdvA"].split()[0]
                                         msg["Basic ID"]["MAC"] = adv_a
@@ -178,6 +179,7 @@ def process_decoded_data(dc, pub):
                 try:
                     fields = decode(structhelper_io(bytes.fromhex(field["AdvData"])))
                     for field_decoded in fields:
+                        field_decoded["message_type"] = "wifi"  # Add message type
                         field_decoded["MAC"] = mac
                         
                         # Add RSSI to decoded fields if available
@@ -193,6 +195,7 @@ def process_decoded_data(dc, pub):
                     log("Decoding Error:", e)
             else:
                 try:
+                    field["message_type"] = "wifi"  # Add message type
                     field["MAC"] = mac
                     json_data = json.dumps(field)
                     if pub:
