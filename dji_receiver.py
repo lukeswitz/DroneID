@@ -38,26 +38,51 @@ FALLBACK_SERIAL_NUMBER = "9999999999"
 def parse_args():
     """
     Parses command-line arguments.
-    Returns an object with 'debug' as a boolean.
+    Returns an object with 'debug' and 'log_file' options.
     """
     parser = argparse.ArgumentParser(description="DJI Receiver: Publish DJI DroneID data via ZMQ.")
     parser.add_argument("-d", "--debug", action="store_true",
                         help="Enable debug messages and logging output.")
+    parser.add_argument("-l", "--log-file", 
+                        help="Path to log file for storing all log messages.")
     return parser.parse_args()
 
-def setup_logging(debug: bool):
+def setup_logging(debug: bool, log_file: str = None):
     """
-    Configures logging to console. Debug mode shows more verbose logs,
-    otherwise only warnings and errors.
+    Configures logging to console and optionally to a file.
+    Debug mode shows more verbose logs on console, otherwise only warnings and errors.
+    If log_file is specified, all logs are written to the file regardless of debug setting.
 
     Args:
-        debug (bool): If True, set log level to DEBUG. Else, WARNING.
+        debug (bool): If True, set console log level to DEBUG. Else, WARNING.
+        log_file (str, optional): Path to a log file. If provided, all logs are written here.
     """
-    log_level = logging.DEBUG if debug else logging.WARNING
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s [%(levelname)s] %(message)s'
-    )
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)  # Capture all logs
+    root_logger.handlers = []  # Clear existing handlers
+    
+    # Format for all handlers
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    
+    # Console handler - level depends on debug flag
+    console_level = logging.DEBUG if debug else logging.WARNING
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(console_level)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+    
+    # File handler - always DEBUG level if enabled
+    if log_file:
+        try:
+            file_handler = logging.FileHandler(log_file, mode='a')  # Append mode
+            file_handler.setLevel(logging.DEBUG)  # All logs go to file
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
+            logging.info(f"Log file initialized: {log_file}")
+        except (PermissionError, FileNotFoundError) as e:
+            logging.error(f"Failed to create log file at {log_file}: {e}")
+            logging.warning("Continuing with console logging only")
 
 def iso_timestamp_now() -> str:
     """Return current UTC time as an ISO8601 string with 'Z' suffix."""
@@ -290,8 +315,15 @@ def tcp_client():
 
 def main():
     args = parse_args()
-    setup_logging(args.debug)
+    setup_logging(args.debug, args.log_file)
+    
+    # Log startup information
+    logging.info("DJI DroneID Receiver starting up")
+    logging.info(f"Debug mode: {'Enabled' if args.debug else 'Disabled'}")
+    logging.info(f"Log file: {args.log_file if args.log_file else 'None'}")
+    
     tcp_client()
 
 if __name__ == "__main__":
     main()
+    
