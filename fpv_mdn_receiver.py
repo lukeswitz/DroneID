@@ -72,6 +72,9 @@ DEFAULT_PATH_LOSS_EXPONENT = 2.7
 DEFAULT_ADV_ADDRESS = 0x8e89bed6
 RECONNECT_DELAY = 5  # seconds
 
+# Global cache to store detections 
+detection_cache = {}
+
 def parse_args():
     """Parses command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -228,36 +231,44 @@ def estimate_distance(rssi, freq, tx_power_dbm, path_loss_exponent):
     
 
 def format_for_zmq_decoder(processed_msg, adv_address):
-    """
-    Format the message to be compatible with zmq_decoder's expected input format.
-    For each detection, creates a properly formatted message that zmq_decoder can process.
-    The advertising address is configurable.
-    """
-    formatted_msg = {
-        "AUX_ADV_IND": {
-            "rssi": processed_msg.get("rssi", 0),
-            "aa": adv_address,
-            "time": iso_timestamp_now()
-        },
-        "aext": {
-            "AdvA": f"{processed_msg.get('source_inst', '')}-{processed_msg.get('source_node', '')} random"
-        }
+  """
+  Format the message to be compatible with zmq_decoder's expected input format.
+  For each detection, creates a properly formatted message that zmq_decoder can process.
+  The advertising address is configurable.
+  """
+  formatted_msg = {
+    "AUX_ADV_IND": {
+      "rssi": processed_msg.get("rssi", 0),
+      "aa": adv_address,
+      "time": iso_timestamp_now()
+    },
+    "aext": {
+      "AdvA": f"{processed_msg.get('source_inst', '')}-{processed_msg.get('source_node', '')} random"
     }
-    
-    # Add drone detection specific data if this is a new contact
-    if processed_msg.get("message_type") == "nodeAlert" and "NEW CONTACT LOCK" in processed_msg.get("status", ""):
-        # Example OpenDroneID header - this could be made configurable too
-        formatted_msg["AdvData"] = "020116faff0d01" 
-        
-        # Add GPS coordinates if available
-        if "gps_lat" in processed_msg and "gps_lon" in processed_msg:
-            formatted_msg["location"] = {
-                "lat": processed_msg["gps_lat"],
-                "lon": processed_msg["gps_lon"]
-            }
-    
-    return formatted_msg
-
+  }
+  
+  # Add drone detection specific data for both NEW CONTACT LOCK and LOCK UPDATE
+  if processed_msg.get("message_type") == "nodeAlert" and ("NEW CONTACT LOCK" in processed_msg.get("status", "") or 
+                              "LOCK UPDATE" in processed_msg.get("status", "")):
+    # Example OpenDroneID header
+    formatted_msg["AdvData"] = "020116faff0d01" 
+  
+    # Add GPS coordinates if available
+    if "gps_lat" in processed_msg and "gps_lon" in processed_msg:
+      formatted_msg["location"] = {
+        "lat": processed_msg["gps_lat"],
+        "lon": processed_msg["gps_lon"]
+      }
+      
+    # Add additional data if available
+    if "distance_m" in processed_msg and processed_msg["distance_m"] is not None:
+      formatted_msg["distance"] = processed_msg["distance_m"]
+      
+    # Add frequency data
+    if "freq" in processed_msg and processed_msg["freq"] is not None:
+      formatted_msg["frequency"] = processed_msg["freq"]
+      
+  return formatted_msg
 def process_fpv_message(data):
     """
     Process an FPV MDN message based on the format in the documentation:
@@ -425,26 +436,51 @@ def main():
             zmq_formatted_msg = format_for_zmq_decoder(processed_msg, args.adv_address)
 
             # Also prepare a drone detection message for FPV detections using values from the message
-            if message_type == "nodeAlert" and "NEW CONTACT LOCK" in status:
-                # Create a detection message array using data directly from the processed message
-                detection_messages = [
-                    {
-                        "FPV Detection": {
-                            "timestamp": iso_timestamp_now(),
-                            "manufacturer": processed_msg.get("source_inst", ""),
-                            "device_type": f"FPV{processed_msg.get('freq', 0)/1e6:.1f}MHz",
-                            "frequency": processed_msg.get("freq", 0),
-                            "bandwidth": processed_msg.get("var", ""),
-                            "signal_strength": processed_msg.get("rssi", 0),
-                            "detection_source": f"{processed_msg['source_inst']}-{processed_msg['source_node']}"
-                        }
-                    }
-                ]
+            if message_type == "nodeAlert":
+              source_key = f"{processed_msg['source_inst']}-{processed_msg['source_node']}"
+              
+              # Initialize or update detection data
+              if source_key not in detection_cache or "NEW CONTACT LOCK" in status:
+                # New detection - create full data structure
+                detection_cache[source_key] = {
+                  "timestamp": iso_timestamp_now(),
+                  "manufacturer": processed_msg.get("source_inst", ""),
+                  "device_type": f"FPV{processed_msg.get('freq', 0)/1e6:.1f}MHz",
+                  "frequency": processed_msg.get("freq", 0),
+                  "bandwidth": processed_msg.get("var", ""),
+                  "signal_strength": processed_msg.get("rssi", 0),
+                  "detection_source": source_key
+                }
+              else:
+                # Update only changed fields
+                detection_cache[source_key]["timestamp"] = iso_timestamp_now()
+                detection_cache[source_key]["signal_strength"] = processed_msg.get("rssi", 0)
                 
-                # Publish as a JSON string
-                zmq_socket.send_string(json.dumps(detection_messages))
-                logging.debug("Published drone detection message: %s", json.dumps(detection_messages))
-
+                if processed_msg.get("freq") is not None:
+                  detection_cache[source_key]["frequency"] = processed_msg.get("freq")
+                  detection_cache[source_key]["device_type"] = f"FPV{processed_msg.get('freq', 0)/1e6:.1f}MHz"
+                  
+              # Always update these fields
+              detection_cache[source_key]["status"] = status
+              
+              # Update distance if available
+              if processed_msg.get("distance_m") is not None:
+                detection_cache[source_key]["estimated_distance"] = processed_msg["distance_m"]
+                
+              # Update GPS if available
+              if lat != 0.0 or lon != 0.0:
+                detection_cache[source_key]["sensor_lat"] = lat
+                detection_cache[source_key]["sensor_lon"] = lon
+                
+              # Create and publish the detection message
+              detection_messages = [{"FPV Detection": detection_cache[source_key]}]
+              zmq_socket.send_string(json.dumps(detection_messages))
+              logging.debug("Published drone detection message: %s", json.dumps(detection_messages))
+              
+              # Clean up cache if contact is lost
+              if "LOST CONTACT LOCK" in status:
+                detection_cache.pop(source_key, None)
+                
             # Publish the original message in zmq_decoder compatible format
             try:
                 json_message = json.dumps(zmq_formatted_msg)
@@ -474,3 +510,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+  
