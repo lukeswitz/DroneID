@@ -279,141 +279,142 @@ def dji_listener(dji_url, pub):
 
 
 def process_decoded_data(dc, pub):
-    """Processes and forwards the decoded Bluetooth/Wi-Fi data."""
-    # Ensure dc is a dictionary before proceeding with key checks
-    if not isinstance(dc, dict):
-        if verbose:
-            log(f"Skipping processing, data is not a dictionary: {type(dc)}")
-        return
-
-    processed = False # Flag to track if any data was processed
-
-    # --- Bluetooth OpenDroneID Processing ---
-    if "AUX_ADV_IND" in dc:
-        aux_adv_ind = dc.get("AUX_ADV_IND", {})
-        # Check for the specific OpenDroneID Bluetooth advertising address (aa)
-        # Make sure aa exists and is an integer before comparing
-        if isinstance(aux_adv_ind.get("aa"), int) and aux_adv_ind["aa"] == 0x8e89bed6:
-            if "AdvData" in dc:
+    """Processes and forwards various types of decoded data."""
+    processed = False
+    
+    # FPV Detection Processing
+    if "FPV Detection" in dc:
+        try:
+            fpv_data = dc["FPV Detection"]
+            fpv_json = json.dumps({
+                "FPV Detection": {
+                    "timestamp": fpv_data.get("timestamp", ""),
+                    "manufacturer": fpv_data.get("manufacturer", ""),
+                    "device_type": fpv_data.get("device_type", ""),
+                    "frequency": fpv_data.get("frequency", ""),
+                    "bandwidth": fpv_data.get("bandwidth", ""),
+                    "signal_strength": fpv_data.get("signal_strength", 0.0),
+                    "detection_source": fpv_data.get("detection_source", "")
+                }
+            })
+            
+            if pub:
+                pub.send_string(fpv_json)
+            if verbose:
+                print("FPV Detection:\n-------------------------")
+                print(fpv_json)
+                print()
+            sys.stdout.flush()
+            processed = True
+        except Exception as e:
+            log("FPV Detection Processing Error:", e)
+            
+    # Bluetooth Open Drone ID Processing
+    if "AUX_ADV_IND" in dc or "ADV_EXT_IND" in dc:
+        try:
+            # Handle messages with or without AdvData
+            if "AdvData" in dc and dc["AdvData"]:
                 try:
-                    advdata_hex = dc["AdvData"]
-                    # Ensure AdvData is not empty or None
-                    if not advdata_hex:
-                         raise ValueError("AdvData is empty")
-                    advdata = bytearray(bytes.fromhex(advdata_hex))
-                    # ODID Service UUID check (0x16 = Service Data, 0xFFFA = ODID UUID, 0x0D = ODID AD Type)
-                    if len(advdata) > 4 and advdata[1] == 0x16 and int.from_bytes(advdata[2:4], 'little') == 0xFFFA and advdata[4] == 0x0D:
+                    advdata = bytearray(bytes.fromhex(dc["AdvData"]))
+                    if advdata[1] == 0x16 and int.from_bytes(advdata[2:4], 'little') == 0xFFFA and advdata[4] == 0x0D:
                         if verbose:
-                            log("Processing Open Drone ID BT4/BT5...")
-                        # Decode the BLE payload
-                        decoded_list = decode_ble(advdata) # Returns a list of messages
-
-                        # Add MAC Address and RSSI from the wrapper JSON
-                        mac_address = None
-                        rssi = aux_adv_ind.get("rssi") # Get RSSI safely
-
-                        # Extract MAC from aext if available
-                        aext = dc.get("aext", {})
-                        if "AdvA" in aext:
-                            # Take the first part of "XX:XX:XX:XX:XX:XX random"
-                            mac_address = aext["AdvA"].split()[0]
-
-                        # Add MAC and RSSI to each decoded message part
-                        processed_messages = []
-                        for msg_part in decoded_list:
-                            if mac_address:
-                                # Add MAC to Basic ID if present, otherwise add directly
-                                if "Basic ID" in msg_part:
-                                    msg_part["Basic ID"]["MAC"] = mac_address
-                                else:
-                                     msg_part["MAC"] = mac_address # Add top-level MAC if no BasicID
-                            if rssi is not None:
-                                 # Add RSSI to Basic ID if present, otherwise add directly
-                                if "Basic ID" in msg_part:
-                                    msg_part["Basic ID"]["RSSI"] = rssi
-                                else:
-                                     msg_part["RSSI"] = rssi # Add top-level RSSI if no BasicID
-                            processed_messages.append(msg_part)
-
-                        # Publish the potentially modified list as a single JSON string
-                        if pub and processed_messages:
-                            json_data = json.dumps(processed_messages)
-                            pub.send_string(json_data)
-                            if verbose:
-                                log("Published BT ODID:", json_data)
-                        processed = True # Mark as processed
-
-                except ValueError as e:
-                    log(f"AdvData Decode/Format Error (BT): {e}, Data: {dc.get('AdvData')}")
-                except Exception as e:
-                    log(f"Unexpected Error Processing BT ODID: {e}")
-
-    # --- Wi-Fi OpenDroneID Processing ---
-    elif "DroneID" in dc:
-        drone_id_data = dc.get("DroneID", {})
-        if isinstance(drone_id_data, dict): # Ensure it's a dictionary
-            for mac, field in drone_id_data.items():
-                 if isinstance(field, dict): # Ensure field is a dictionary
-                    if verbose:
-                        log(f"Processing Open Drone ID WIFI for MAC: {mac}...")
-
-                    # Add RSSI if available in the wrapper JSON
-                    rssi = None
-                    if "AUX_ADV_IND" in dc and isinstance(dc["AUX_ADV_IND"], dict):
-                        rssi = dc["AUX_ADV_IND"].get("rssi")
-
-                    if "AdvData" in field:
-                        try:
-                            advdata_hex = field["AdvData"]
-                            if not advdata_hex:
-                                raise ValueError("AdvData is empty")
-                            # Decode Wi-Fi payload (expects bytes)
-                            decoded_fields = decode(structhelper_io(bytes.fromhex(advdata_hex)))
-
-                            # Add MAC and RSSI to each decoded message part
-                            for field_decoded in decoded_fields:
-                                if isinstance(field_decoded, dict): # Ensure it's a dict
-                                    field_decoded["MAC"] = mac
-                                    if rssi is not None:
-                                        field_decoded["RSSI"] = rssi
-                                    # Publish each decoded part individually
-                                    if pub:
-                                        json_data = json.dumps(field_decoded)
-                                        pub.send_string(json_data)
-                                        if verbose:
-                                            log("Published Wi-Fi ODID Part:", json_data)
-                                else:
-                                     log(f"Decoded Wi-Fi field is not a dict: {field_decoded}")
-                            processed = True # Mark as processed
-
-                        except ValueError as e:
-                            log(f"AdvData Decode/Format Error (Wi-Fi): {e}, Data: {field.get('AdvData')}")
-                        except Exception as e:
-                            log(f"Decoding Error (Wi-Fi): {e}")
-                    else:
-                        # Handle cases where DroneID message might not have AdvData
-                        # but contains other useful info (less common for standard ODID)
-                        try:
-                            field["MAC"] = mac
-                            if rssi is not None:
-                                field["RSSI"] = rssi
+                            print("Open Drone ID BT4/BT5\n-------------------------\n")
+                        json_data = decode_ble(advdata)
+                except ValueError:
+                    # If AdvData can't be decoded, create a minimal message
+                    json_data = json.dumps([{
+                        "Basic ID": {
+                            "MAC": dc.get("aext", {}).get("AdvA", "Unknown").split()[0],
+                            "RSSI": dc.get("AUX_ADV_IND", {}).get("rssi", 0) or dc.get("ADV_EXT_IND", {}).get("rssi", 0)
+                        }
+                    }])
+            else:
+                # Create a minimal message for messages without AdvData
+                json_data = json.dumps([{
+                    "Basic ID": {
+                        "MAC": dc.get("aext", {}).get("AdvA", "Unknown").split()[0],
+                        "RSSI": dc.get("AUX_ADV_IND", {}).get("rssi", 0) or dc.get("ADV_EXT_IND", {}).get("rssi", 0),
+                        "did": dc.get("aext", {}).get("AdvDataInfo", {}).get("did"),
+                        "sid": dc.get("aext", {}).get("AdvDataInfo", {}).get("sid")
+                    }
+                }])
+                
+            # Enhance JSON with additional information
+            try:
+                json_obj = json.loads(json_data)
+                if isinstance(json_obj, list) and len(json_obj) > 0:
+                    for msg in json_obj:
+                        if "Basic ID" in msg:
+                            # Add additional context from message
+                            if "aext" in dc and "AdvA" in dc["aext"]:
+                                msg["Basic ID"]["MAC"] = dc["aext"]["AdvA"].split()[0]
+                            if "AUX_ADV_IND" in dc:
+                                msg["Basic ID"]["RSSI"] = dc["AUX_ADV_IND"]["rssi"]
+                            elif "ADV_EXT_IND" in dc:
+                                msg["Basic ID"]["RSSI"] = dc["ADV_EXT_IND"]["rssi"]
+                json_data = json.dumps(json_obj)
+            except json.JSONDecodeError:
+                pass
+                
+            if pub:
+                pub.send_string(json_data)
+            if verbose:
+                print(json_data)
+                print()
+            sys.stdout.flush()
+            processed = True
+        except Exception as e:
+            log("Bluetooth Message Processing Error:", e)
+            
+    # Wi-Fi Open Drone ID Processing
+    if "DroneID" in dc:
+        for mac, field in dc["DroneID"].items():
+            try:
+                if verbose:
+                    print("Open Drone ID WIFI\n-------------------------\n")
+                    
+                if "AUX_ADV_IND" in dc:
+                    field["RSSI"] = dc["AUX_ADV_IND"]["rssi"]
+                    
+                if "AdvData" in field:
+                    try:
+                        fields = decode(structhelper_io(bytes.fromhex(field["AdvData"])))
+                        for field_decoded in fields:
+                            field_decoded["MAC"] = mac
+                            
+                            if "AUX_ADV_IND" in dc:
+                                field_decoded["RSSI"] = dc["AUX_ADV_IND"]["rssi"]
+                                
+                            json_data = json.dumps(field_decoded)
                             if pub:
-                                json_data = json.dumps(field)
                                 pub.send_string(json_data)
-                                if verbose:
-                                    log("Published Wi-Fi Direct Field:", json_data)
-                            processed = True # Mark as processed
-                        except Exception as e:
-                            log(f"JSON Dump Error (Wi-Fi Direct Field): {e}")
-                 else:
-                     log(f"Field for MAC {mac} is not a dictionary: {field}")
-        else:
-             log(f"DroneID data is not a dictionary: {drone_id_data}")
-
-    # Log if a message was received but not processed by ODID logic
-    if not processed and verbose and "AUX_ADV_IND" not in dc and "DroneID" not in dc:
-         log(f"Received message not matching known ODID structures: {list(dc.keys())}")
-
+                            if verbose:
+                                print(json_data)
+                    except Exception as e:
+                        log("Decoding Error:", e)
+                else:
+                    try:
+                        field["MAC"] = mac
+                        json_data = json.dumps(field)
+                        if pub:
+                            pub.send_string(json_data)
+                        if verbose:
+                            print(json_data)
+                    except Exception as e:
+                        log("JSON Dump Error:", e)
+                        
+                if verbose:
+                    print()
+                sys.stdout.flush()
+                processed = True
+            except Exception as e:
+                log("Wi-Fi Message Processing Error:", e)
+                
+    # Log if no known message type was processed
+    if not processed and verbose:
+        log("Received message not matching known structures:", list(dc.keys()))
+        
+    return processed
 
 def main():
     global stop, verbose, RECONNECT_DELAY # Make RECONNECT_DELAY accessible if needed elsewhere
