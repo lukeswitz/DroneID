@@ -94,36 +94,35 @@ def uart_listener(uart_device, pub):
                                 # Find start of the JSON object
                                 start_idx = buffer.find('{')
                                 if start_idx == -1:
-                                    # No JSON found, trim buffer
                                     if len(buffer) > 4096:
                                         buffer = ""
                                     break
-
+                                
                                 try:
                                     obj, end_idx = decoder.raw_decode(buffer[start_idx:])
                                     full_idx = start_idx + end_idx
                                     
-                                    # Validate Basic ID structure
-                                    if isinstance(obj, dict) and "Basic ID" in obj:
+                                    # Forward any valid JSON object or array from UART
+                                    if isinstance(obj, dict):
                                         if pub:
                                             pub.send_string(json.dumps(obj))
                                         if verbose:
                                             log(f"UART Forwarded: {json.dumps(obj)}")
-                                            
-                                        # Flush what was processed
+                                    elif isinstance(obj, list):
+                                        for entry in obj:
+                                            if pub:
+                                                pub.send_string(json.dumps(entry))
+                                            if verbose:
+                                                log(f"UART Forwarded: {json.dumps(entry)}")
+                                                
                                     buffer = buffer[full_idx:]
-                                    
-                                    # Check for more data
                                     if not buffer.strip():
                                         break
                                     
                                 except json.JSONDecodeError as e:
-                                    # Handle incomplete JSON
                                     if e.msg == "Unterminated string starting at":
-                                        # Preserve unterminated strings, it happens
                                         buffer = buffer[start_idx:]
                                     else:
-                                        # Skip invalid JSON
                                         buffer = buffer[start_idx+1:]
                                     break
                                 except Exception as e:
@@ -131,7 +130,6 @@ def uart_listener(uart_device, pub):
                                     buffer = buffer[start_idx+1:]
                                     break
                                 
-                                # Keep the buffer in check
                             if len(buffer) > 65536:
                                 buffer = buffer[-32768:]
                                 
@@ -151,7 +149,7 @@ def uart_listener(uart_device, pub):
         except Exception as e:
             log(f"Unexpected UART Error: {e}. Retrying in 5s...")
             time.sleep(5)
-
+            
 def dji_listener(dji_url, pub):
     """Subscribes to DJI Receiver and forwards data as-is."""
     global stop
@@ -332,3 +330,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
