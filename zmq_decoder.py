@@ -79,77 +79,76 @@ def uart_listener(uart_device, pub):
     global stop, verbose
     buffer = ""
     decoder = json.JSONDecoder()
-    while not stop:
-        try:
-            with serial.Serial(uart_device, baudrate=115200, timeout=1) as ser:
-                log(f"UART connected to {uart_device}")
-                while not stop:
-                    if ser.in_waiting > 0:
+    with serial.Serial(uart_device, baudrate=115200, timeout=1) as ser:
+        log(f"UART connected to {uart_device}")
+        while not stop:
+            if ser.in_waiting > 0:
+                try:
+                    data = ser.read(ser.in_waiting).decode('utf-8')
+                    buffer += data
+                    if buffer.count("{") == buffer.count("}") and buffer.count("{") > 0:
                         try:
-                            data_bytes = ser.read(ser.in_waiting)
-                            data = data_bytes.decode("utf-8", errors="replace")
-                            buffer += data
-                            
-                            while True:
-                                # Find start of the JSON object
-                                start_idx = buffer.find('{')
-                                if start_idx == -1:
-                                    if len(buffer) > 4096:
-                                        buffer = ""
-                                    break
-                                
-                                try:
-                                    obj, end_idx = decoder.raw_decode(buffer[start_idx:])
-                                    full_idx = start_idx + end_idx
-                                    
-                                    # Forward any valid JSON object or array from UART
-                                    if isinstance(obj, dict):
-                                        if pub:
-                                            pub.send_string(json.dumps(obj))
-                                        if verbose:
-                                            log(f"UART Forwarded: {json.dumps(obj)}")
-                                    elif isinstance(obj, list):
-                                        for entry in obj:
-                                            if pub:
-                                                pub.send_string(json.dumps(entry))
-                                            if verbose:
-                                                log(f"UART Forwarded: {json.dumps(entry)}")
-                                                
-                                    buffer = buffer[full_idx:]
-                                    if not buffer.strip():
-                                        break
-                                    
-                                except json.JSONDecodeError as e:
-                                    if e.msg == "Unterminated string starting at":
-                                        buffer = buffer[start_idx:]
-                                    else:
-                                        buffer = buffer[start_idx+1:]
-                                    break
-                                except Exception as e:
-                                    log(f"UART Processing Error: {e}")
-                                    buffer = buffer[start_idx+1:]
-                                    break
-                                
-                            if len(buffer) > 65536:
-                                buffer = buffer[-32768:]
-                                
-                        except serial.SerialException as e:
-                            log(f"UART Read/Serial Error: {e}")
+                            dc = json.loads(buffer)
+                            json_data = json.dumps(dc)
+                            if pub:
+                                pub.send_string(json_data)
+                            if verbose:
+                                print(f"Forwarded via ZMQ: {json_data}")
                             buffer = ""
+                            continue
+                        except json.JSONDecodeError as e:
+                            log("UART JSON Decode Error:", e)
+                            # If this fails, fall through to streaming
+                    while True:
+                        match = None
+                        for i, c in enumerate(buffer):
+                            if c == '{' or c == '[':
+                                match = i
+                                break
+                        if match is None:
+                            if len(buffer) > 4096:
+                                buffer = ""
+                            break
+                        start_idx = match
+                        try:
+                            obj, end_idx = decoder.raw_decode(buffer[start_idx:])
+                            full_idx = start_idx + end_idx
+                            if isinstance(obj, dict):
+                                if pub:
+                                    pub.send_string(json.dumps(obj))
+                                if verbose:
+                                    log(f"UART Forwarded: {json.dumps(obj)}")
+                            elif isinstance(obj, list):
+                                for entry in obj:
+                                    if pub:
+                                        pub.send_string(json.dumps(entry))
+                                    if verbose:
+                                        log(f"UART Forwarded: {json.dumps(entry)}")
+                            buffer = buffer[full_idx:]
+                            if not buffer.strip():
+                                break
+                        except json.JSONDecodeError as e:
+                            if e.msg == "Unterminated string starting at":
+                                buffer = buffer[start_idx:]
+                            else:
+                                buffer = buffer[start_idx+1:]
                             break
                         except Exception as e:
-                            log(f"UART Processing Unexpected Error: {e}")
-                            buffer = ""
-                    else:
-                        time.sleep(0.1)
-                        
-        except serial.SerialException as e:
-            log(f"Failed to open UART {uart_device}: {e}. Retrying in 5s...")
-            time.sleep(5)
-        except Exception as e:
-            log(f"Unexpected UART Error: {e}. Retrying in 5s...")
-            time.sleep(5)
-            
+                            log(f"UART Processing Error: {e}")
+                            buffer = buffer[start_idx+1:]
+                            break
+                    if len(buffer) > 65536:
+                        buffer = buffer[-32768:]
+                except serial.SerialException as e:
+                    log(f"UART Read/Serial Error: {e}")
+                    buffer = ""
+                    break
+                except Exception as e:
+                    log(f"UART Processing Unexpected Error: {e}")
+                    buffer = ""
+            else:
+                time.sleep(0.1)
+
 def dji_listener(dji_url, pub):
     """Subscribes to DJI Receiver and forwards data as-is."""
     global stop
