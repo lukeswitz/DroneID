@@ -40,7 +40,7 @@ def zmq_thread(pub_socket):
         pass
 
 def decoder_thread(socket, pub):
-    """Handles Bluetooth/Wi-Fi OpenDroneID messages."""
+    """Handles Bluetooth/Wi-Fi OpenDroneID messages and FPV Detection messages."""
     global stop
     poller = zmq.Poller()
     poller.register(socket, zmq.POLLIN)
@@ -66,8 +66,23 @@ def decoder_thread(socket, pub):
                     if verbose:
                         print("ZMQ Data Received:", json.dumps(dc, indent=2))
                     
-                    # Process Bluetooth/Wi-Fi data
-                    process_decoded_data(dc, pub)
+                    # Check if this is an FPV Detection message (array format)
+                    if isinstance(dc, list) and len(dc) > 0 and "FPV Detection" in dc[0]:
+                        # Forward FPV Detection messages directly
+                        if pub:
+                            pub.send_string(json.dumps(dc))
+                        if verbose:
+                            log("FPV Detection message forwarded:", json.dumps(dc))
+                    # Check if this is a single FPV Detection message (object format)
+                    elif isinstance(dc, dict) and "FPV Detection" in dc:
+                        # Forward single FPV Detection message directly
+                        if pub:
+                            pub.send_string(json.dumps(dc))
+                        if verbose:
+                            log("FPV Detection message forwarded:", json.dumps(dc))
+                    else:
+                        # Process standard Bluetooth/Wi-Fi data
+                        process_decoded_data(dc, pub)
     except zmq.error.ContextTerminated:
         pass
     except Exception as e:
@@ -297,6 +312,9 @@ def main():
         sub = sctx.socket(zmq.SUB)
         sub.setsockopt(zmq.SUBSCRIBE, b'{"AUX_ADV_IND"')
         sub.setsockopt(zmq.SUBSCRIBE, b'{"DroneID"')
+        # Add subscription for FPV Detection messages
+        sub.setsockopt(zmq.SUBSCRIBE, b'[{"FPV Detection"')
+        sub.setsockopt(zmq.SUBSCRIBE, b'{"FPV Detection"')
         try:
             sub.connect(url)
         except zmq.error.ZMQError as e:
@@ -329,4 +347,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
