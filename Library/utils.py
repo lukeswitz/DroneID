@@ -77,28 +77,41 @@ def clear_interface_state():
         pass
 
 
-def kill_interfering_processes():
+def kill_interfering_processes(interface: str):
     """
-    Kill processes that interfere with monitor mode (NetworkManager, wpa_supplicant).
-    This is similar to 'airmon-ng check kill'.
+    Stop processes from interfering with monitor mode on a SPECIFIC interface.
+    Unlike 'airmon-ng check kill', this only affects the target interface,
+    leaving NetworkManager and other interfaces (Ethernet, onboard WiFi) intact.
+
+    Args:
+        interface: The WiFi interface name to unmanage (e.g., 'wlx9cefd5feeabc')
     """
-    # Try airmon-ng first if available
+    print(f"Unmanaging interface {interface} from NetworkManager...")
+
+    # Tell NetworkManager to stop managing this specific interface
+    # This is much safer than killing NetworkManager entirely
     result = subprocess.run(
-        ["which", "airmon-ng"],
-        capture_output=True, text=True
+        ["nmcli", "device", "set", interface, "managed", "no"],
+        capture_output=True, text=True, timeout=10
     )
     if result.returncode == 0:
-        print("Using airmon-ng to kill interfering processes...")
-        subprocess.run(["sudo", "airmon-ng", "check", "kill"],
-                      capture_output=True, timeout=10)
-        return
+        print(f"NetworkManager will no longer manage {interface}")
+    else:
+        # nmcli might fail if NM isn't running or interface isn't known - that's OK
+        print(f"Note: nmcli returned {result.returncode} (may be fine if NM doesn't manage this interface)")
 
-    # Manual kill of common interfering processes
-    print("Stopping interfering processes...")
-    interfering = ["wpa_supplicant", "NetworkManager", "dhclient", "avahi-daemon"]
-    for proc in interfering:
-        subprocess.run(["sudo", "pkill", "-9", proc],
-                      capture_output=True, timeout=5)
+    # Kill any wpa_supplicant processes specifically for this interface
+    # Use pkill with -f to match the interface name in the command line
+    subprocess.run(
+        ["sudo", "pkill", "-f", f"wpa_supplicant.*{interface}"],
+        capture_output=True, timeout=5
+    )
+
+    # Kill any dhclient processes specifically for this interface
+    subprocess.run(
+        ["sudo", "pkill", "-f", f"dhclient.*{interface}"],
+        capture_output=True, timeout=5
+    )
 
 
 def disable_power_save(interface: str) -> bool:
@@ -156,8 +169,8 @@ def recover_monitor_mode(interface: str) -> bool:
     """
     print(f"Attempting to recover monitor mode on {interface}...")
     try:
-        # Kill interfering processes first
-        kill_interfering_processes()
+        # Kill interfering processes for this specific interface only
+        kill_interfering_processes(interface)
 
         # Bring interface down
         subprocess.run(["sudo", "ip", "link", "set", interface, "down"],
@@ -278,8 +291,8 @@ def enable_monitor_mode(i2d, interface):
         exit(1)
 
     # Kill interfering processes first - this is critical for stability
-    # This stops NetworkManager and wpa_supplicant from fighting us
-    kill_interfering_processes()
+    # This stops NetworkManager and wpa_supplicant from fighting us for THIS interface only
+    kill_interfering_processes(interface)
 
     sudo(["rfkill", "unblock", "all"])
 
