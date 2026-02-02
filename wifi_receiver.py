@@ -11,7 +11,8 @@ import socket as pysock
 from threading import Thread, Event
 
 from Library.utils import search_interfaces, get_iw_interfaces, extract_wifi_if_details, enable_monitor_mode, \
-    set_interface_channel, cexec, enable_managed_mode
+    set_interface_channel, cexec, enable_managed_mode, check_monitor_mode, recover_monitor_mode, \
+    load_interface_state, clear_interface_state
 from OpenDroneID.wifi_parser import oui_to_parser, parse_nan_action_frame
 from scapy.all import *
 from scapy.layers.dot11 import Dot11EltVendorSpecific, Dot11, Dot11Elt
@@ -290,11 +291,63 @@ def main():
         )
         sniffer.start()
         print(f"Starting sniffer on interface {interface}")
+
+        # Health check interval (seconds)
+        HEALTH_CHECK_INTERVAL = 30
+        last_health_check = time.time()
+
         try:
             while True:
                 time.sleep(1)
+
+                # Periodic health check for monitor mode
+                if time.time() - last_health_check >= HEALTH_CHECK_INTERVAL:
+                    last_health_check = time.time()
+                    if not check_monitor_mode(interface):
+                        print(f"WARNING: Monitor mode lost on {interface}!")
+
+                        # Stop sniffer before recovery
+                        try:
+                            sniffer.stop()
+                        except Exception:
+                            pass
+
+                        # Attempt recovery
+                        if recover_monitor_mode(interface):
+                            # Set channel again
+                            set_interface_channel(interface, channel)
+
+                            # Restart sniffer
+                            sniffer = AsyncSniffer(
+                                iface=interface,
+                                lfilter=lambda s: s.haslayer(Dot11) and s.getlayer(Dot11).subtype in [0x8, 0xD],
+                                prn=filter_frames,
+                                store=False,
+                            )
+                            sniffer.start()
+                            print(f"Sniffer restarted on {interface}")
+
+                            # Restart channel hopper if needed
+                            if hop_enabled and hop_thread is not None:
+                                if hop_stop_evt is not None:
+                                    hop_stop_evt.set()
+                                    hop_thread.join(timeout=2)
+                                hop_stop_evt = Event()
+                                hop_thread = Thread(
+                                    target=channel_hopper,
+                                    args=(interface, (6, 149), (dwell_24g, dwell_5g), hop_stop_evt),
+                                    daemon=True,
+                                    name="chan_hopper",
+                                )
+                                hop_thread.start()
+                        else:
+                            # Recovery failed - exit so systemd can restart us
+                            print("Monitor mode recovery failed, exiting for systemd restart...")
+                            sys.exit(1)
+
         except KeyboardInterrupt:
             pass
+
         print(f"Stopping sniffer on interface {interface}")
         sniffer.stop()
         if hop_thread is not None and hop_stop_evt is not None:
