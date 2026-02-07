@@ -11,10 +11,12 @@ import socket as pysock
 from threading import Thread, Event
 
 from Library.utils import search_interfaces, get_iw_interfaces, extract_wifi_if_details, enable_monitor_mode, \
-    set_interface_channel, cexec, enable_managed_mode
-from OpenDroneID.wifi_parser import oui_to_parser
+    set_interface_channel, cexec, enable_managed_mode, check_monitor_mode, recover_monitor_mode, \
+    load_interface_state, clear_interface_state
+from OpenDroneID.wifi_parser import oui_to_parser, parse_nan_action_frame
 from scapy.all import *
 from scapy.layers.dot11 import Dot11EltVendorSpecific, Dot11, Dot11Elt
+from scapy.packet import Raw
 import zmq
 
 verbose = False
@@ -100,28 +102,65 @@ def filter_frames(packet: Packet) -> None:
     global verbose
     macdb = {}
     pt = packet.getlayer(Dot11)
-    # subtype 0 = Management, 0x8 = Beacon, 0x13 = Action
-    # NAN Service Discovery Frames shall be encoded in 0x13 and contain DRI Info
-    # NAN Synchronization Beacon shall be encoded in 0x8 but doesn't contain DRI Info
-    # Broadcast Message can only happen on channel 6 and contains DRI Info
-    if pt is not None and pt.subtype in [0, 0x8, 0x13]:
-        if packet.haslayer(Dot11EltVendorSpecific):  # check vendor specific ID -> 221
+    # subtype 0x8 = Beacon, 0xD = Action (NAN Service Discovery)
+    # NAN Service Discovery Frames (Action 0xD) contain DRI Info in Service Descriptor
+    # NAN Synchronization Beacon (0x8) may contain DRI Info in Vendor Specific IE
+    # Broadcast Message (Beacon) can only happen on channel 6 and contains DRI Info
+    if pt is not None and pt.subtype in [0, 0x8, 0xD]:
+        mac = pt.addr2
+        macdb["DroneID"] = {}
+        macdb["DroneID"][mac] = []
+
+        parsed = False
+
+        # Path 1: Handle Vendor Specific IE (beacons and some other frames)
+        if packet.haslayer(Dot11EltVendorSpecific):
             vendor_spec: Dot11EltVendorSpecific = packet.getlayer(Dot11EltVendorSpecific)
-            mac = packet.payload.addr2
-            macdb["DroneID"] = {}
-            macdb["DroneID"][mac] = []
             while vendor_spec:
                 parser = oui_to_parser(vendor_spec.oui, vendor_spec.info)
                 if parser is not None:
                     if "DRI" in parser.msg:
                         macdb["DroneID"][mac] = parser.msg["DRI"]
+                        parsed = True
                     elif "Beacon" in parser.msg:
                         macdb["DroneID"][mac] = parser.msg["Beacon"]
-                    if socket:
-                        socket.send_string(json.dumps(macdb))
-                    if not socket or verbose:
-                        print(json.dumps(macdb))
-                break
+                        parsed = True
+                    break
+                # Try next vendor specific element
+                vendor_spec = vendor_spec.payload.getlayer(Dot11EltVendorSpecific) if vendor_spec.payload else None
+
+        # Path 2: Handle NAN Action frames (don't use Vendor Specific IE)
+        if not parsed and pt.subtype == 0xD:
+            try:
+                # For action frames, we need to get the payload after Dot11 header
+                raw_payload = None
+
+                # Try to get Raw layer first
+                if packet.haslayer(Raw):
+                    raw_payload = bytes(packet.getlayer(Raw).load)
+                else:
+                    # Get bytes after Dot11 header
+                    # Action frame body starts right after the MAC header (24 bytes from Dot11 start)
+                    raw_bytes = bytes(packet)
+                    dot11_start = raw_bytes.find(b'\xd0\x00')  # Action frame control
+                    if dot11_start >= 0:
+                        raw_payload = raw_bytes[dot11_start + 24:]
+
+                if raw_payload:
+                    result = parse_nan_action_frame(raw_payload)
+                    if result and "AdvData" in result:
+                        macdb["DroneID"][mac] = result
+                        parsed = True
+            except Exception as e:
+                if verbose:
+                    print(f"Error parsing NAN action frame: {e}")
+
+        # Output if we parsed something
+        if parsed:
+            if socket:
+                socket.send_string(json.dumps(macdb))
+            if not socket or verbose:
+                print(json.dumps(macdb))
 
 def main():
     global verbose
@@ -246,17 +285,69 @@ def main():
     if interface is not None:
         sniffer = AsyncSniffer(
             iface=interface,
-            lfilter=lambda s: s.haslayer(Dot11) and s.getlayer(Dot11).subtype == 0x8,
+            lfilter=lambda s: s.haslayer(Dot11) and s.getlayer(Dot11).subtype in [0x8, 0xD],
             prn=filter_frames,
             store=False,  # Don't store packets in memory - prevents memory leak
         )
         sniffer.start()
         print(f"Starting sniffer on interface {interface}")
+
+        # Health check interval (seconds)
+        HEALTH_CHECK_INTERVAL = 30
+        last_health_check = time.time()
+
         try:
             while True:
                 time.sleep(1)
+
+                # Periodic health check for monitor mode
+                if time.time() - last_health_check >= HEALTH_CHECK_INTERVAL:
+                    last_health_check = time.time()
+                    if not check_monitor_mode(interface):
+                        print(f"WARNING: Monitor mode lost on {interface}!")
+
+                        # Stop sniffer before recovery
+                        try:
+                            sniffer.stop()
+                        except Exception:
+                            pass
+
+                        # Attempt recovery
+                        if recover_monitor_mode(interface):
+                            # Set channel again
+                            set_interface_channel(interface, channel)
+
+                            # Restart sniffer
+                            sniffer = AsyncSniffer(
+                                iface=interface,
+                                lfilter=lambda s: s.haslayer(Dot11) and s.getlayer(Dot11).subtype in [0x8, 0xD],
+                                prn=filter_frames,
+                                store=False,
+                            )
+                            sniffer.start()
+                            print(f"Sniffer restarted on {interface}")
+
+                            # Restart channel hopper if needed
+                            if hop_enabled and hop_thread is not None:
+                                if hop_stop_evt is not None:
+                                    hop_stop_evt.set()
+                                    hop_thread.join(timeout=2)
+                                hop_stop_evt = Event()
+                                hop_thread = Thread(
+                                    target=channel_hopper,
+                                    args=(interface, (6, 149), (dwell_24g, dwell_5g), hop_stop_evt),
+                                    daemon=True,
+                                    name="chan_hopper",
+                                )
+                                hop_thread.start()
+                        else:
+                            # Recovery failed - exit so systemd can restart us
+                            print("Monitor mode recovery failed, exiting for systemd restart...")
+                            sys.exit(1)
+
         except KeyboardInterrupt:
             pass
+
         print(f"Stopping sniffer on interface {interface}")
         sniffer.stop()
         if hop_thread is not None and hop_stop_evt is not None:
