@@ -205,7 +205,7 @@ def estimate_distance(rssi, freq, tx_power_dbm, path_loss_exponent):
         logging.warning("Invalid frequency value: %s Hz", freq)
         return None
       
-      freq_mhz = freq / 1e6
+      freq_mhz = freq
       if freq_mhz <= 0:
         logging.warning("Invalid frequency in MHz: %s", freq_mhz)
         return None
@@ -445,7 +445,7 @@ def main():
                 detection_cache[source_key] = {
                   "timestamp": iso_timestamp_now(),
                   "manufacturer": processed_msg.get("source_inst", ""),
-                  "device_type": f"FPV{processed_msg.get('freq', 0)/1e6:.1f}MHz",
+                  "device_type": f"FPV{processed_msg.get('freq', 0):.1f}MHz",
                   "frequency": processed_msg.get("freq", 0),
                   "bandwidth": processed_msg.get("var", ""),
                   "signal_strength": processed_msg.get("rssi", 0),
@@ -458,7 +458,7 @@ def main():
                 
                 if processed_msg.get("freq") is not None:
                   detection_cache[source_key]["frequency"] = processed_msg.get("freq")
-                  detection_cache[source_key]["device_type"] = f"FPV{processed_msg.get('freq', 0)/1e6:.1f}MHz"
+                  detection_cache[source_key]["device_type"] = f"FPV{processed_msg.get('freq', 0):.1f}MHz"
                   
               # Always update these fields
               detection_cache[source_key]["status"] = status
